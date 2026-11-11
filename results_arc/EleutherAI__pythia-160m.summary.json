@@ -1,0 +1,54 @@
+{
+  "summary": {
+    "model": "EleutherAI/pythia-160m",
+    "dtype": "float32",
+    "n_per_stratum": 300,
+    "strata": {
+      "low": {
+        "stratum": "low",
+        "n": 300,
+        "E": 0.3813,
+        "E_se": 0.0065,
+        "corpus_bias": null,
+        "learning_error": null,
+        "ECE": 0.1461,
+        "accuracy": 0.2533,
+        "mean_k": 5.01,
+        "mean_top1_conf": 0.389,
+        "E_uniform": 0.336,
+        "E_rel": 1.1349,
+        "mean_conf_gold": 0.2209,
+        "mean_conf_gold_se": 0.0084,
+        "chance_conf": 0.2291,
+        "tied_at_top_rate": 0.006666666666666667,
+        "auroc_self_eval": 0.3749706296992481,
+        "auroc_max_prob": 0.47227443609022557
+      },
+      "high": {
+        "stratum": "high",
+        "n": 231,
+        "E": 0.4161,
+        "E_se": 0.0106,
+        "corpus_bias": null,
+        "learning_error": null,
+        "ECE": 0.1303,
+        "accuracy": 0.4372,
+        "mean_k": 4.0,
+        "mean_top1_conf": 0.5345,
+        "E_uniform": 0.3748,
+        "E_rel": 1.1102,
+        "mean_conf_gold": 0.3541,
+        "mean_conf_gold_se": 0.0157,
+        "chance_conf": 0.2499,
+        "tied_at_top_rate": 0.004329004329004329,
+        "auroc_self_eval": 0.5787128712871287,
+        "auroc_max_prob": 0.5998476770753999
+      }
+    },
+    "length_normalised": true,
+    "control": "arc",
+    "k_options": 0,
+    "match_on_k": false
+  },
+  "records": {}
+}

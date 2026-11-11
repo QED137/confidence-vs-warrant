@@ -1,0 +1,203 @@
+"""Collect run outputs into a CSV, a LaTeX table, and a verdict on P1-P3.
+
+    python -m src.report --results results/ --sizes configs/pythia_sizes.json
+
+Writes figures/results.csv and figures/results_table.tex, and prints whether
+each prediction of Section 7.4 is supported by the runs found.  The verdicts are
+descriptive, not significance tests; treat them as a reading aid.
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import glob
+import json
+import os
+
+
+FIELDS = [
+    "model", "n_params", "stratum", "n", "E", "E_se",
+    "corpus_bias", "learning_error", "ECE", "accuracy",
+    "mean_k", "mean_top1_conf", "E_uniform", "E_rel", "mean_conf_gold", "mean_conf_gold_se", "chance_conf",
+    "tied_at_top_rate", "auroc_max_prob", "auroc_self_eval", "auroc_semantic_entropy",
+]
+
+
+def load_summaries(results_dir: str) -> list[dict]:
+    """Load each run's summary, recomputing it from the stored per-item records
+    when the summary predates a metric (so new diagnostics need no re-run)."""
+    from src import metrics
+
+    out = []
+    for path in sorted(glob.glob(os.path.join(results_dir, "*.json"))):
+        with open(path) as f:
+            blob = json.load(f)
+        summary, records = blob["summary"], blob.get("records", {})
+        for stratum, recs in records.items():
+            if not recs:
+                continue
+            have = summary["strata"].get(stratum, {})
+            if "E_rel" in have and "chance_conf" in have and have.get("mean_conf_gold_se") is not None:
+                continue
+            fresh = metrics.aggregate(stratum, recs).as_row()
+            fresh.update({k: v for k, v in summary["strata"][stratum].items()
+                          if k.startswith("auroc") or k == "tied_at_top_rate"})
+            summary["strata"][stratum] = fresh
+        out.append(summary)
+    return out
+
+
+def to_rows(summaries: list[dict], sizes: dict) -> list[dict]:
+    rows = []
+    for s in summaries:
+        for stratum in ("low", "high"):
+            if stratum not in s["strata"]:
+                continue
+            row = {"model": s["model"], "n_params": sizes.get(s["model"])}
+            row.update(s["strata"][stratum])
+            rows.append({k: row.get(k) for k in FIELDS})
+    rows.sort(key=lambda r: (r["n_params"] or 0, r["stratum"]))
+    return rows
+
+
+def write_csv(rows: list[dict], path: str) -> None:
+    with open(path, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=FIELDS)
+        w.writeheader()
+        w.writerows(rows)
+
+
+def write_latex(rows: list[dict], path: str) -> None:
+    def fmt(v, nd=3):
+        return "--" if v is None else f"{v:.{nd}f}"
+
+    lines = [
+        r"\begin{tabular}{lrrrrr}", r"\toprule",
+        r"Model & Stratum & $E$ & ECE & Acc. & AUROC (self-eval) \\", r"\midrule",
+    ]
+    for r in rows:
+        name = r["model"].split("/")[-1].replace("_", r"\_")
+        stratum = r"$\mathcal{S}_{\mathrm{low}}$" if r["stratum"] == "low" \
+            else r"$\mathcal{S}_{\mathrm{high}}$"
+        lines.append(
+            f"{name} & {stratum} & {fmt(r['E'])} & {fmt(r['ECE'])} & "
+            f"{fmt(r['accuracy'])} & {fmt(r.get('auroc_self_eval'))} \\\\"
+        )
+    lines += [r"\bottomrule", r"\end{tabular}"]
+    with open(path, "w") as f:
+        f.write("\n".join(lines) + "\n")
+
+
+def check_predictions(rows: list[dict]) -> list[str]:
+    msgs = []
+    low = [r for r in rows if r["stratum"] == "low"]
+    high = [r for r in rows if r["stratum"] == "high"]
+    by_model = {}
+    for r in rows:
+        by_model.setdefault(r["model"], {})[r["stratum"]] = r
+
+    # P1 - per model, not averaged: an average hides a crossover
+    pairs = [(m, d["low"]["E"], d["high"]["E"]) for m, d in by_model.items()
+             if "low" in d and "high" in d]
+    pairs.sort(key=lambda t: by_model[t[0]]["low"]["n_params"] or 0)
+    if pairs:
+        holds = [m for m, el, eh in pairs if el > eh]
+        msgs.append("P1 dissociation, per model (E_low > E_high expected):")
+        for m, el, eh in pairs:
+            mark = "yes" if el > eh else "NO "
+            msgs.append(f"    {mark}  {m.split('/')[-1]:<14} low={el:.3f} high={eh:.3f}")
+        if len(holds) == len(pairs):
+            msgs.append("    [SUPPORTED at every scale]")
+        elif holds:
+            msgs.append(f"    [SUPPORTED only above {pairs[len(pairs)-len(holds)-1][0].split('/')[-1]}"
+                        f" - report the crossover, do not average it away]")
+        else:
+            msgs.append("    [NOT SUPPORTED]")
+
+    # P2 - the central prediction
+    sized = sorted([r for r in low if r["n_params"]], key=lambda r: r["n_params"])
+    if len(sized) >= 3:
+        d_low = sized[-1]["E"] - sized[0]["E"]
+        hs = sorted([r for r in high if r["n_params"]], key=lambda r: r["n_params"])
+        d_high = hs[-1]["E"] - hs[0]["E"] if len(hs) >= 3 else float("nan")
+        verdict = "SUPPORTED" if (d_low >= -0.02 and d_high < -0.05) else "NOT SUPPORTED"
+        msgs.append(
+            f"P2 scale dissociation: dE(low)={d_low:+.3f}  dE(high)={d_high:+.3f}"
+            f"  over {sized[0]['n_params']/1e6:.0f}M-{sized[-1]['n_params']/1e9:.1f}B  [{verdict}]"
+        )
+        if all(r.get("learning_error") is not None for r in sized):
+            cb = [r["corpus_bias"] for r in sized]
+            le = [r["learning_error"] for r in sized]
+            msgs.append(f"    decomposition: corpus bias {cb[0]:.3f}->{cb[-1]:.3f}, "
+                        f"learning error {le[0]:.3f}->{le[-1]:.3f}")
+        else:
+            msgs.append("    decomposition: no P_text estimates (see src/assertion.py)")
+
+    # sharpness check - is the model confidently wrong, or just undecided?
+    for r_ in sorted(low, key=lambda r: r["n_params"] or 0):
+        if r_.get("E_rel") is None:
+            continue
+        if r_["E_rel"] < 1.10:
+            msgs.append(
+                f"    NOTE {r_['model'].split('/')[-1]}: E_rel={r_['E_rel']:.2f} "
+                f"(E={r_['E']:.3f} vs indifference {r_['E_uniform']:.3f}, k={r_['mean_k']:.1f}) "
+                f"- undecided, not confidently wrong; the reproductive regime is not visible yet"
+            )
+
+    # mass on the true answer: the sharpness-free version of P2
+    for name, grp in (("low", low), ("high", high)):
+        s = sorted([x for x in grp if x.get("mean_conf_gold") is not None
+                    and x["n_params"]], key=lambda x: x["n_params"])
+        if len(s) >= 2:
+            ch = s[0].get("chance_conf") or float("nan")
+            msgs.append(
+                f"    conf(gold) on S_{name}: "
+                + " -> ".join(f"{x['mean_conf_gold']:.3f}" for x in s)
+                + f"   (chance {ch:.3f})"
+            )
+
+    # P3 - a detector that cannot discriminate anywhere supports nothing
+    for det in ("auroc_max_prob", "auroc_self_eval", "auroc_semantic_entropy"):
+        l = [r[det] for r in low if r.get(det) is not None]
+        h = [r[det] for r in high if r.get(det) is not None]
+        if not (l and h):
+            continue
+        a_l, a_h = sum(l) / len(l), sum(h) / len(h)
+        if a_h < 0.60:
+            verdict = "INCONCLUSIVE - detector is at chance on BOTH strata, so it " \
+                      "tests nothing at this scale"
+        elif a_h - a_l > 0.10:
+            verdict = "SUPPORTED"
+        else:
+            verdict = "NOT SUPPORTED"
+        msgs.append(f"P3 [{det}]: AUROC low={a_l:.3f} high={a_h:.3f}  [{verdict}]")
+    return msgs
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--results", default="results")
+    ap.add_argument("--sizes", default="configs/pythia_sizes.json")
+    ap.add_argument("--outdir", default="figures")
+    args = ap.parse_args()
+
+    os.makedirs(args.outdir, exist_ok=True)
+    with open(args.sizes) as f:
+        sizes = json.load(f)
+    summaries = load_summaries(args.results)
+    if not summaries:
+        raise SystemExit(f"no result files in {args.results}/ - did step 4 finish?")
+
+    rows = to_rows(summaries, sizes)
+    write_csv(rows, os.path.join(args.outdir, "results.csv"))
+    write_latex(rows, os.path.join(args.outdir, "results_table.tex"))
+
+    print(f"\n{len(summaries)} model(s) found\n")
+    for line in check_predictions(rows):
+        print("  " + line)
+    print(f"\nwrote {args.outdir}/results.csv and {args.outdir}/results_table.tex")
+
+
+if __name__ == "__main__":
+    main()

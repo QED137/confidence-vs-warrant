@@ -1,0 +1,23 @@
+# --- never commit -------------------------------------------------------
+.venv/
+.env                      # machine-specific paths; see .env.example
+hf_cache/                 # ~80 GB of model weights and datasets
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# --- cluster output: keep the directories, not the contents -------------
+logs/*
+!logs/.gitkeep
+results/*                 # superseded TriviaQA control runs
+!results/.gitkeep
+figures/*
+!figures/.gitkeep
+
+# --- published results: summaries are committed, see scripts/09 ---------
+results_arc/*.json        # full runs incl. per-item records (large)
+!results_arc/*.summary.json
+figures_arc/*.pdf
+*.out
+paper_central_theme.md
+.history

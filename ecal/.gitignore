@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.venv/
+hf_cache/
+results/*.json
+figures/*.pdf
+logs/
